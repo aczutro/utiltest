@@ -19,9 +19,9 @@
 #
 ################################################################### aczutro ###
 
-from __future__ import print_function; # this allows you to use this module
+from __future__ import print_function; # this allows to use this module
                                        # with Python 2 as well
-from subprocess import Popen as _subprocess, PIPE as _pipe;
+from subprocess import Popen as _child, PIPE as _pipe;
 
 
 ### base class ################################################################
@@ -181,7 +181,7 @@ class TestBench:
         if self.verbose:
             self.pprint();
         #if
-        P = _subprocess(self.cmd, stdin=_pipe, stdout=_pipe, stderr=_pipe);
+        P = _child(self.cmd, stdin=_pipe, stdout=_pipe, stderr=_pipe);
         stdout, stderr = (data.decode() for data in P.communicate(self.stdin));
         if (P.returncode != self.code
             or stdout != self.stdout
@@ -291,6 +291,8 @@ if __name__ == '__main__':
     # fails.
     TB.cmd_replace(0, 'true');
     TB.execute();
+
+    exit(0);
 #if
 
 ### end ########################################################### aczutro ###
