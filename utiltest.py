@@ -1,6 +1,7 @@
 #!/usr/bin/python3
+'''library for advanced automated testing of command line utilities'''
 #
-# utiltest - python library for the test of command line utilities
+# utiltest - python library for advanced automated testing of command line utilities
 #
 # Copyright 2017 Alexander Czutro
 #
@@ -19,18 +20,223 @@
 #
 ################################################################### aczutro ###
 
-from __future__ import print_function; # this allows to use this module
-                                       # with Python 2 as well
+from __future__ import print_function; # for compatibility with Python 2
 from subprocess import Popen as _child, PIPE as _pipe;
+from os import makedirs as _mkdirs, \
+    symlink as _symlink, \
+    remove as _rm, \
+    rmdir as _rmdir;
+from os.path import isdir as _isdir, isfile as _isfile, islink as _islink;
+
+from os.path import exists as _exists, realpath as _realpath;
+
+import aczutro;
+aczutro.check_version(1, 0);
+
+version_info = aczutro.VersionInfo(2, 0);
+__version__ = str(version_info);
+__author__ = 'Alexander Czutro, github@czutro.ch';
+
+def check_version(*version):
+    '''Returns True if current version of this module is greater
+    or equal to 'version'.  Throws ValueError otherwise.'''
+    if version <= version_info:
+        return True;
+    else:
+        raise ValueError("Version %s of module '%s' not available." %
+                         ('.'.join([str(i) for i in version]), __name__)
+        );
+    #else
+#check_version
 
 
-### base class ################################################################
+### class for the management of temporal files ################################
+
+class TMPFileManager:
+    '''Manager of temporal files.  Should be initialised in a with statement.
+    Then, all temporal files/directories/symlinks created via the manager or
+    registered with the manager within the with block, are automatically
+    deleted at the end of the with block (if they still exist; if they don't,
+    no error is raised).'''
+    def __enter__(self):
+        self.files = [];
+        self.own_files = [];
+        return self;
+    #__enter__
+
+
+    def __exit__(self, type, value, traceback):
+        for f in reversed(self.files):
+            if _exists(f):
+                if _isdir(f):
+                    _rmdir(f);
+                else:
+                    _rm(f);
+                #else
+            #if
+        #for
+    #__exit__
+
+
+    def add_directory(self, directory):
+        '''Creates a temporal directory.'''
+        if _exists(directory):
+            raise ValueError("file/directory '%s' already exists" % directory);
+        #if
+        _mkdirs(directory, 0o755);
+        self.files.append(directory);
+    #add_directory
+
+
+    def register_directory(self, directory):
+        '''Registers an existing directory for deletion
+        at the end of the with block.'''
+        if not _exists(directory) or not _isdir(directory):
+            raise ValueError(
+                "directory/file '%s' doesn't exist or is not a directory"
+                % directory);
+        #if
+        self.files.append(directory);
+    #register_directory
+
+
+    def add_file(self, filename, *contents):
+        '''Creates a temporal file (empty if 'contents' is (None)).'''
+        if _exists(filename):
+            raise ValueError("file/directory '%s' already exists" % filename);
+        #if
+        with open(filename, 'x') as f:
+            if contents:
+                print(*contents, file=f);
+            #if
+        #with
+        self.files.append(filename);
+        self.own_files.append(filename);
+    #add_file
+
+
+    def modify_file(self, filename, *contents):
+        '''Modifies the contents of a temporal file.  For security reasons, this
+        is only possible with files that have been previously added via
+        add_file(...).'''
+        if filename not in self.own_files:
+            raise ValueError("can't overwrite unmanaged file '%s'" % filename);
+        #if
+        if not _exists(filename):
+            raise ValueError("file '%s' doesn't exist" % filename);
+        #if
+        with open(filename, 'w') as f:
+            if contents:
+                print(*contents, file=f);
+            #contents
+        #with
+    #add_file
+
+
+    def register_file(self, filename):
+        '''Registers an existing file for deletion
+        at the end of the with block.'''
+        if not _exists(filename) or not _isfile(filename):
+            raise ValueError(
+                "directory/file '%s' doesn't exist or is not a regular file"
+                % filename);
+        #if
+        self.files.append(filename);
+    #register_file
+
+
+    def add_symlink(self, link, target):
+        '''Creates a temporal symbolic link to 'target'.'''
+        if _exists(link):
+            raise ValueError("file/directory '%s' already exists" % link);
+        #if
+        _symlink(_realpath(target), link);
+        self.files.append(link);
+    #add_symlink
+
+
+    def register_symlink(self, link):
+        '''Registers an existing symbolic link for deletion
+        at the end of the with block.'''
+        if not _exists(link) or not _islink(link):
+            raise ValueError(
+                "directory/file '%s' doesn't exist or is not a symbolic link"
+                % link);
+        #if
+        self.files.append(link);
+    #register_symlink
+
+
+    def unmanage_files(self):
+        '''Unmanages previously added files/links/directories, so they won't
+        be deleted at the end of the with block.
+            This actually defeats the purpose of this class.  Hence, it
+        should be used only for debugging purposes.'''
+        self.files = [];
+    #unmanage_files
+#TMPFileManager
+
+
+
+### exception class for failed experiments ####################################
+
+class TestExperimentFailure(Exception):
+    '''Exception class to hold info on failed test experiments.'''
+    def __init__(self, *args):
+        Exception.__init__(self, '''Test experiment failed.
+Details:
+    command line: %s
+    stdin:        %r
+    return code:
+        expected: %s
+        returned: %s
+    stdout:
+        expected: %r
+        returned: %r
+    stderr:
+        expected: %r
+        returned: %r
+    failed files: %r''' % args
+        );
+        self.cmd, self.stdin, \
+            self.exp_code, self.act_code, \
+            self.exp_stdout, self.act_stdout, \
+            self.exp_stderr, self.act_stderr, \
+            self.failed_files = args;
+    #__init__
+#TestExperimentFailure
+
+### test bench ################################################################
 
 class TestBench:
-    '''Base class for test experiments.'''
+    '''A test experiment consists in:
+        - running an external application (application-under-test -- AUT)
+          and capturing its exit code and the data it writes to STDOUT and
+          STDERR,
+        - comparing exit code, STDOUT and STDERR buffers to their expected
+          values,
+        - performing a file check, i.e. checking whether the AUT has created
+          the expected files and whether those files have the right
+          contents.
+        The test experiment is successful if all checks listed above are
+    successful.
+        This class provides the means to perform any number of test
+    experiments with little preparation.  Use the functions that start with
+    'set_' or with 'cmd' to specify or manipulate the command line that will
+    run the AUT, to set the input to be passed to the AUT, and to register
+    the expected values for exit code and output buffers.  Use
+    add_file_check(...) to register files for the file check.  Use
+    reset(...) to reset one, several or all parameters back to the test
+    bench's default state (empty command line, no file check, exit code 0
+    and empty ouput buffers).  Finally, use execute() to run the test
+    experiment as specified above.  If the test experiment is succesful,
+    nothing happens and you can continue to use the test bench for further
+    experiments.  If the experiment fails, execute() raises an exception
+    with a detailed description of why the experiment failed.
+    '''
 
-    CMD, STDIN, CODE, STDOUT, STDERR = (2**i for i in range(5));
-    ALL = 31; # 2**5 - 1
+    CMD, STDIN, CODE, STDOUT, STDERR, FILES = (2**i for i in range(6));
+    ALL = 63; # 2**6 - 1
 
 
     def __init__(self, verbose=False):
@@ -42,13 +248,16 @@ class TestBench:
         self.stderr = None;
         self.reset(self.ALL);
         self.verbose = verbose;
+        self.files = [];
     #__init__
 
 
     def __repr__(self):
         '''Returns repr(self).'''
-        return '%s : %r : %s : %r : %r' % (
-            self.cmd, self.stdin, self.code, self.stdout, self.stderr);
+        return '%s : %r : %s : %r : %r : %r' % (
+            self.cmd, self.stdin,
+            self.code, self.stdout,
+            self.stderr, self.files);
     #__repr__
 
 
@@ -67,7 +276,8 @@ class TestBench:
                           ('stdin          :', self.stdin),
                           ('expected code  :', self.code),
                           ('expected stdout:', self.stdout),
-                          ('expected stderr:', self.stderr)
+                          ('expected stderr:', self.stderr),
+                          ('files          :', self.files)
                          ]
         ]));
     #pprint
@@ -76,7 +286,7 @@ class TestBench:
     def reset(self, what):
         '''Resets the fields specified by 'what'.  'what' is ALL or
         the bitwise disjunction of one or several of CMD, STDIN,
-        CODE, STDOUT and STDERR.'''
+        CODE, STDOUT, STDERR and FILES.'''
         if what & self.CMD:
           self.cmd = [];
         #if
@@ -92,6 +302,9 @@ class TestBench:
         if what & self.STDERR:
             self.stderr = '';
         #if
+        if what & self.FILES:
+            self.files = [];
+        #if
     #reset
 
 
@@ -101,25 +314,24 @@ class TestBench:
     #set_cmd
 
 
-    def append_to_cmd(self, *cmd):
+    def cmd_append(self, *cmd):
         '''Appends the given arguments to command.'''
         self.cmd.extend(cmd);
-    #append_to_cmd
+    #cmd_append
 
 
-    def pop_from_cmd(self, index=None):
+    def cmd_pop(self, index=None):
         '''Removes index'th token from command line,
         or the last if index is None.
         index may also be negative (to address command
         line tokens counting backwards from the end).
-        Raises IndexError.
         '''
         if index:
             self.cmd.pop(index);
         else:
             self.cmd.pop();
         #else
-    #pop_from_cmd
+    #cmd_pop
 
 
     def cmd_insert(self, index, newarg):
@@ -135,7 +347,7 @@ class TestBench:
         '''Replaces index'th token of cmd by newarg.
         index may also be negative (to address command
         line tokens counting backwards from the end).
-        Raises IndexError.'''
+        '''
         self.cmd[index] = newarg;
     #cmd_replace
 
@@ -151,8 +363,8 @@ class TestBench:
             - set code to first argument,
             - set stdout to second argument,
             - set stderr to third argument.
-        If 2 arguments are given (disregarding self), set
-        code, stdout ot stderr to second argument.
+            If 2 arguments are given (disregarding self),
+        set code, stdout or stderr to second argument.
         First argument specifies which.'''
         if arg3 is None: # arg1 is what and arg2 is value
             if arg1 & self.CODE:
@@ -162,9 +374,8 @@ class TestBench:
             elif arg1 & self.STDERR:
                 self.stderr = arg2;
             else:
-                raise Exception('If fourth positional argument is None,',
-                                'second argument must be TestBench.CODE,',
-                                'TestBench.STDOUT or TestBench.STDERR.'
+                raise ValueError(
+                    'arg2 must be TestBench.CODE, TestBench.STDOUT or TestBench.STDERR.'
                 );
             #else
         else: # arg1 is code, arg2 is stdout and arg3 is stderr
@@ -175,6 +386,28 @@ class TestBench:
     #set_expected
 
 
+    EXISTS = True;
+    NOT_EXISTS = False;
+
+    def add_file_check(self, filename, mode):
+        '''After running the AUT, execute() will also do a file check for each
+        file registered with this function.  mode determines the type of the
+        file check to be performed:
+            - mode == TestBench.EXISTS: check successful if the file exists
+            - mode == TestBench.NOT_EXISTS: check successful if the file doesn't
+                                            exist
+            - mode is a string: check successful is the file exists and its
+                                contents are identical to those of mode
+        '''
+        if mode not in (self.EXISTS, self.NOT_EXISTS) \
+           and not isinstance(mode, str):
+            raise ValueError('content must be TestBench.EXISTS, '
+                             'TestBench.NOT_EXISTS or a string');
+        #if
+        self.files.append((filename, mode));
+    #add_file_check
+
+
     def execute(self):
         '''Runs test experiment and raises an Exception with a detailed
         description if the experiment fails.'''
@@ -183,42 +416,34 @@ class TestBench:
         #if
         P = _child(self.cmd, stdin=_pipe, stdout=_pipe, stderr=_pipe);
         stdout, stderr = (data.decode() for data in P.communicate(self.stdin));
+        failed_files = self._file_check();
         if (P.returncode != self.code
             or stdout != self.stdout
             or stderr != self.stderr
+            or failed_files
         ):
             if self.stdin:
                 self.stdin = self.stdin.decode();
             #if
-            raise Exception('''Test experiment failed.
-Details:
-    command line: %s
-    stdin:        %r
-    return code:
-        expected: %s
-        returned: %s
-    stdout:
-        expected: %r
-        returned: %r
-    stderr:
-        expected: %r
-        returned: %r''' % (' '.join((self._fix(token) for token in self.cmd)),
-                           self.stdin,
-                           self.code, P.returncode,
-                           self.stdout, stdout,
-                           self.stderr, stderr)
+            raise TestExperimentFailure(
+                ' '.join((self._fix(token) for token in self.cmd)),
+                self.stdin,
+                self.code, P.returncode,
+                self.stdout, stdout,
+                self.stderr, stderr,
+                failed_files
             );
         #if
     #execute
 
 
     def _fix(self, string):
-        '''Adds appropriate quotes to string for
+        '''Private function: Adds appropriate quotes to string for
         printing of final command line.'''
         if string:
             if self._has_one_not_of(
                     string,
-                    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=+~:,.'
+                    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=+~:,./'
             ):
                 if string.find("'") != -1:
                     return '"%s"' % string;
@@ -231,11 +456,11 @@ Details:
         else:
             return "''";
         #else
-    #def
+    #_fix
 
 
     def _has_one_not_of(self, string, chars):
-        '''Returns true if string includes a character
+        '''Private function: Returns true if string includes a character
         not contained in chars.'''
         for ch in string:
             if ch not in chars:
@@ -244,6 +469,37 @@ Details:
         #for
         return False;
     #_has_one_not_of
+
+
+    def _file_check(self):
+        '''Private function: Performs the file check.  If the test passes,
+        returns [].  If the test doesn't pass, returns a list of tuples
+        (f_i, r_i), where the f_i are files that didn't pass the test and
+        the r_i are None if the file doesn't exist, or the file's actual
+        contents as a string if it exists.'''
+        failed_files = [];
+        for filename, mode in self.files:
+            if mode == self.NOT_EXISTS:
+                if _exists(filename):
+                    failed_files.append((filename, 'file exists'));
+                #if
+            else:
+                if not _exists(filename):
+                    failed_files.append((filename, "file doesn't exist"));
+                elif isinstance(mode, str):
+                    with open(filename, 'r') as f:
+                        actual_content = f.read();
+                        if actual_content != mode:
+                            failed_files.append((filename,
+                                                 "wrong contents: >>>%s<<<"
+                                                 % actual_content));
+                        #if
+                    #with
+                #elif
+            #else
+        #for
+        return failed_files;
+    #_file_check
 #TestBench
 
 
@@ -281,7 +537,7 @@ if __name__ == '__main__':
 
     # This tests the command line utility "false" again. It is expected to
     # ignore all command line arguments and to exit with code 1.
-    TB.append_to_cmd('ignored', 'arguments', '-and', '--options');
+    TB.cmd_append('ignored', 'arguments', '-and', '--options');
     TB.execute();
 
     # This tests the command line utility "true" with the same arguments we
@@ -289,7 +545,7 @@ if __name__ == '__main__':
     # However, we are intentionally not updating the expected return code
     # registered in the test bench in order to show what happens when a test
     # fails.
-    TB.cmd_replace(0, 'true');
+    TB.set_cmd('true', 'This failure is intentional -- test passed!');
     TB.execute();
 
     exit(0);
