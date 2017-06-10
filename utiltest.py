@@ -33,7 +33,7 @@ from os.path import exists as _exists, realpath as _realpath;
 import aczutro;
 aczutro.check_version(1, 0);
 
-version_info = aczutro.VersionInfo(2, 0);
+version_info = aczutro.VersionInfo(2, 1);
 __version__ = str(version_info);
 __author__ = 'Alexander Czutro, github@czutro.ch';
 
@@ -61,13 +61,14 @@ class TMPFileManager:
     def __enter__(self):
         self.files = [];
         self.own_files = [];
+        self.own_links = [];
         return self;
     #__enter__
 
 
     def __exit__(self, type, value, traceback):
         for f in reversed(self.files):
-            if _exists(f):
+            if _exists(f) or _islink(f):
                 if _isdir(f):
                     _rmdir(f);
                 else:
@@ -130,7 +131,7 @@ class TMPFileManager:
                 print(*contents, file=f);
             #contents
         #with
-    #add_file
+    #modify_file
 
 
     def register_file(self, filename):
@@ -152,13 +153,30 @@ class TMPFileManager:
         #if
         _symlink(_realpath(target), link);
         self.files.append(link);
+        self.own_links.append(link);
     #add_symlink
+
+
+    def modify_symlink(self, link, target):
+        '''Changes the target a link points to.  For security reasons, this
+        is only possible with links that have been previously added via
+        add_symlink(...).'''
+        if link not in self.own_links:
+            raise ValueError("can't modify unmanaged symlink '%s'" % link);
+        #if
+        if not _islink(link):
+            raise ValueError("file '%s' doesn't exist or is not a symlink"
+                             % link);
+        #if
+        _rm(link);
+        _symlink(_realpath(target), link);
+    #modify_symlink
 
 
     def register_symlink(self, link):
         '''Registers an existing symbolic link for deletion
         at the end of the with block.'''
-        if not _exists(link) or not _islink(link):
+        if not _exists(link) and not _islink(link):
             raise ValueError(
                 "directory/file '%s' doesn't exist or is not a symbolic link"
                 % link);
@@ -484,7 +502,7 @@ class TestBench:
                     failed_files.append((filename, 'file exists'));
                 #if
             else:
-                if not _exists(filename):
+                if not _exists(filename) and not _islink(filename):
                     failed_files.append((filename, "file doesn't exist"));
                 elif isinstance(mode, str):
                     with open(filename, 'r') as f:
